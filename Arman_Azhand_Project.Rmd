@@ -1,0 +1,338 @@
+---
+title: "DS 6373 Project"
+author: "Arman Azhand"
+date: "2025-12-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tswge)
+library(tseries)
+library(nnfor)
+library(tidyverse)
+library(corrplot)
+library(vars)
+```
+
+# Data
+
+This dataset provides daily weather observations from Heathrow, United Kingdom, spanning the period from 1979 to 2023. The data is sourced from the European Climate Assessment & Dataset (ECA&D) and includes multiple weather parameters such as temperature, precipitation, sunshine, and more. The CSV file was obtained from the Kaggle  [London Weather Data From 1979 to 2023](https://www.kaggle.com/datasets/zongaobian/london-weather-data-from-1979-to-2023) dataset.
+```{r}
+daily_data = read.csv("./project_data/london_weather_data_1979_to_2023.csv")
+daily_data$DATE = as.Date(as.character(daily_data$DATE), format = "%Y%m%d")
+daily_data$Avg_Temp = daily_data$TG
+daily_data$Precipitation = daily_data$RR
+daily_data$Humidity = daily_data$HU
+daily_data$Sea_Level_Pressure = daily_data$PP
+
+clean_data = daily_data %>% dplyr::select(DATE, Avg_Temp, Precipitation, Humidity, Sea_Level_Pressure) %>% dplyr::filter(DATE >= as.Date("2022-01-01"))
+summary(clean_data)
+```
+
+The raw dataset contains the following features that were recorded daily from 1979 to 2023:
+
+- DATE: Date in YYYYMMDD format.
+- TX: Daily maximum temperature in 0.1°C.
+- TN: Daily minimum temperature in 0.1°C.
+- TG: Daily mean temperature in 0.1°C.
+- SS: Daily sunshine duration in 0.1 hours.
+- SD: Daily snow depth in 1 cm.
+- RR: Daily precipitation amount in 0.1 mm.
+- QQ: Daily global radiation in W/m².
+- PP: Daily sea level pressure in 0.1 hPa.
+- HU: Daily relative humidity in %.
+- CC: Daily cloud cover in oktas.
+
+For the purpose of my analysis, I decided to focus on the mean temperature (TG) and look at some other features such as precipitation (RR), humidity (HU), and sea level pressure (PP) as well as reduce the period to the most recent two years (2022 to 2023).
+
+
+```{r}
+# ACFs and Spectral Density
+plotts.sample.wge(clean_data$Avg_Temp)
+parzen.wge(clean_data$Avg_Temp, trunc = 365)
+acf(clean_data$Avg_Temp, lag.max = 364)
+plotts.wge(daily_data$TG)
+plotts.wge(clean_data$Avg_Temp)
+```
+
+Data seems highly nonstationary as there seems to be a clear trend within the realizations. Furthermore, the autocorrelations seem highly autocorrelated at each subsequent lag and damp slowly.
+
+We will suplement this further with a Dickey-Fuller test.
+
+# Univariate Models
+
+## ARIMA and ARMA models
+```{r}
+# Dickey-Fuller test for a unit root: p > 0.05
+adf.test(clean_data$Avg_Temp)
+
+# differenced once
+d1 = artrans.wge(clean_data$Avg_Temp, phi.tr = 1, lag.max = 400)
+
+# differenced once and for s = 365
+d1.s365 = artrans.wge(d1, phi.tr = c(rep(0,364),1), lag.max = 400)
+
+# s = 365
+s365 = artrans.wge(clean_data$Avg_Temp, phi.tr = c(rep(0,364),1), lag.max = 400)
+
+# best p and q estimates by AIC and AICC for d1, d1.s365, and s365 respectively
+aic5.wge(d1, p = 0:10, q=0:3, type="aic")
+aic5.wge(d1, p = 0:10, q=0:3, type="aicc")
+
+aic5.wge(d1.s365, p = 0:10, q=0:3, type="aic")
+aic5.wge(d1.s365, p = 0:10, q=0:3, type="aicc")
+
+aic5.wge(s365, p = 0:10, q=0:3, type="aic")
+aic5.wge(s365, p = 0:10, q=0:3, type="aicc")
+
+aic5.wge(clean_data$Avg_Temp, p = 0:10, q=0:3, type="aic")
+aic5.wge(clean_data$Avg_Temp, p = 0:10, q=0:3, type="aicc")
+```
+
+The Dickey-Fuller test supports our previous claim as we are unable to reject the null hypothesis (p > 0.05). Thus, we will transform our data by differencing  d = 1.
+
+I also checked for a few other transformations, but results we futile as the generation of data using those models would be highly unstable.
+
+```{r}
+est.d1 = est.arma.wge(d1, p=1, q=2)
+mean(d1)
+est.d1$avar
+spectral_dens = parzen.wge(clean_data$Avg_Temp, plot = FALSE)
+plot(spectral_dens$freq, spectral_dens$pzgram, type = "l", col = "black", lwd = 3, main = "Average Daily Temperature: ARIMA(1,1,2)", xlab = "Frequency", ylab = "Spectral Density (dB)")
+for (i in 1:10) {
+  generated_series = gen.arima.wge(n=730, phi = est.d1$phi, theta = est.d1$theta, d = 1, s = 0 , mu = mean(d1), vara = est.d1$avar, plot = FALSE, sn = i)
+  spec_dens_gen = parzen.wge(generated_series, plot = FALSE)
+  lines(spec_dens_gen$freq, spec_dens_gen$pzgram, type = "l", col = "blue", lwd = 1)
+}
+```
+
+$\phi(B)(1-B)(X_t+0.07956104)=\theta(B)a_t$, $\hat{\sigma_a^2}=347.1934$  
+Where $\phi(B) = 1 - 0.6177B$ and $\theta(B) = 1 - 0.7367B - 0.1153B^2$
+
+Our ARIMA(1,1,2) appears alright at first glance. The spectral densities are following the general shape of the original data, however, a little loosely.
+
+
+```{r}
+est.stationary = est.arma.wge(clean_data$Avg_Temp, p=2, q=2)
+mean(clean_data$Avg_Temp)
+est.stationary$avar
+spectral_dens = parzen.wge(clean_data$Avg_Temp, plot = FALSE)
+plot(spectral_dens$freq, spectral_dens$pzgram, type = "l", col = "black", lwd = 3, main = "Average Daily Temperature: ARMA(2,2)", xlab = "Frequency", ylab = "Spectral Density (dB)")
+for (i in 1:10) {
+  generated_series = gen.arma.wge(n=730, phi = est.stationary$phi, theta = est.stationary$theta, mu = mean(clean_data$Avg_Temp), vara = est.stationary$avar, plot = FALSE, sn = i)
+  spec_dens_gen = parzen.wge(generated_series, plot = FALSE)
+  lines(spec_dens_gen$freq, spec_dens_gen$pzgram, type = "l", col = "green", lwd = 1)
+}
+```
+
+
+$\phi(B)(X_t-127.9781)=\theta(B)a_t$, $\hat{\sigma_a^2}=347.1808$  
+Where $\phi(B) = 1 - 1.5687B + 0.5738B^2$ and $\theta(B) = 1 - 0.6939B - 0.1216B^2$
+
+Even though the data is most likely not stationary (due to our previous analysis), I thought it would be interesting to still model this data using a stationary model using ARMA. Surprisingly, the model seems to follow the spectral density somewhat better.
+
+```{r}
+# short h = 7
+# ARMA
+fore.arma.short = fore.arma.wge(clean_data$Avg_Temp, phi = est.stationary$phi, theta = est.stationary$theta, n.ahead = 7, lastn = TRUE)
+mean((fore.arma.short$f - clean_data$Avg_Temp[724:730])^2)
+
+#ARIMA
+fore.arima.short = fore.arima.wge(clean_data$Avg_Temp, phi = est.d1$phi, theta = est.d1$theta, d = 1, n.ahead = 7, lastn = TRUE)
+mean((fore.arima.short$f - clean_data$Avg_Temp[724:730])^2)
+
+rw.arma.short = roll.win.rmse.wge(clean_data$Avg_Temp, horizon = 7, phi = est.stationary$phi, theta = est.stationary$theta)
+rw.arima.short = roll.win.rmse.wge(clean_data$Avg_Temp, horizon = 7, d = 1, phi = est.d1$phi, theta = est.d1$theta)
+
+# long h = 30
+# ARMA
+fore.arma.long = fore.arma.wge(clean_data$Avg_Temp, phi = est.stationary$phi, theta = est.stationary$theta, n.ahead = 30, lastn = TRUE)
+mean((fore.arma.long$f - clean_data$Avg_Temp[701:730])^2)
+
+# ARIMA
+fore.arima.long = fore.arima.wge(clean_data$Avg_Temp, phi = est.d1$phi, theta = est.d1$theta, d = 1, n.ahead = 30, lastn = TRUE)
+mean((fore.arima.long$f - clean_data$Avg_Temp[701:730])^2)
+
+rw.arma.long = roll.win.rmse.wge(clean_data$Avg_Temp, horizon = 30, phi = est.stationary$phi, theta = est.stationary$theta)
+rw.arima.long = roll.win.rmse.wge(clean_data$Avg_Temp, horizon = 30, d = 1, phi = est.d1$phi, theta = est.d1$theta)
+```
+
+```{r}
+ylim_l = min(c(fore.arima.long$ll,fore.arma.long$ll,fore.arima.short$ll,fore.arma.short$ll))
+
+ylim_u = max(c(fore.arima.long$ul,fore.arma.long$ul,fore.arima.short$ul,fore.arma.short$ul))
+
+plot(clean_data$Avg_Temp[724:730],type="l",col="black",xlab="Last n", ylab="Average Daily Temperature",ylim=c(ylim_l,ylim_u), main = "Average Daily Temperature with ARMA(2,2) Forecasts h = 7")
+lines(seq(1,7),fore.arma.short$f,col="green")
+lines(seq(1,7),fore.arma.short$ul,col="lightgreen")
+lines(seq(1,7),fore.arma.short$ll,col="lightgreen")
+
+plot(clean_data$Avg_Temp[724:730],type="l",col="black",xlab="Last n", ylab="Average Daily Temperature",ylim=c(ylim_l,ylim_u), main = "Average Daily Temperature with ARIMA(1,1,2) Forecasts h = 7")
+lines(seq(1,7),fore.arima.short$f,col="blue")
+lines(seq(1,7),fore.arima.short$ul,col="lightblue")
+lines(seq(1,7),fore.arima.short$ll,col="lightblue")
+
+plot(clean_data$Avg_Temp[701:730],type="l",col="black",xlab="Last n", ylab="Average Daily Temperature",ylim=c(ylim_l,ylim_u), main = "Average Daily Temperature with ARMA(2,2) Forecasts h = 30")
+lines(seq(1,30),fore.arma.long$f,col="green")
+lines(seq(1,30),fore.arma.long$ul,col="lightgreen")
+lines(seq(1,30),fore.arma.long$ll,col="lightgreen")
+
+plot(clean_data$Avg_Temp[701:730],type="l",col="black",xlab="Last n", ylab="Average Daily Temperature",ylim=c(ylim_l,ylim_u), main = "Average Daily Temperature with ARIMA(1,1,2) Forecasts h = 30")
+lines(seq(1,30),fore.arima.long$f,col="blue")
+lines(seq(1,30),fore.arima.long$ul,col="lightblue")
+lines(seq(1,30),fore.arima.long$ll,col="lightblue")
+```
+
+ARIMA(1,1,2) seems to perform better in the short-run (h=7) whereas ARMA(2,2) performs better in the long-run (h=30)
+
+# Multivariate models
+
+## VAR
+```{r}
+ccf(clean_data$Avg_Temp,clean_data$Precipitation)
+ccf(clean_data$Avg_Temp,clean_data$Humidity)
+ccf(clean_data$Avg_Temp,clean_data$Sea_Level_Pressure)
+vardata = clean_data %>% dplyr::select(Avg_Temp, Humidity)
+```
+Humidity appears to be the most correlated with Avg_Temperature. Thus, we will use it for multivariate model building.
+
+```{r}
+vardata_train7 = vardata[1:723,]
+vardata_train30 = vardata[1:700,]
+VARselect(vardata, lag.max = 10, type="const", season=NULL,exogen=NULL)
+
+varmod7 = VAR(vardata_train7, p = 6, type = "both")
+preds7=predict(varmod7,n.ahead=7)
+mean((clean_data$Avg_Temp[724:730]-preds7$fcst$Avg_Temp[1:7,1])^2)
+plot(clean_data$Avg_Temp[724:730],type="l",col="black",xlab="Last n", ylab="Average Daily Temperature",ylim=c(ylim_l,ylim_u), main = "Average Daily Temperature with VAR Forecasts h = 7")
+lines(seq(1,7),preds7$fcst$Avg_Temp[1:7,1],col="red")
+lines(seq(1,7),preds7$fcst$Avg_Temp[1:7,2],col="salmon")
+lines(seq(1,7),preds7$fcst$Avg_Temp[1:7,3],col="salmon")
+
+varmod30 = VAR(vardata_train30, p = 6, type = "both")
+preds30=predict(varmod30,n.ahead=30)
+mean((clean_data$Avg_Temp[701:730]-preds30$fcst$Avg_Temp[1:30,1])^2)
+plot(clean_data$Avg_Temp[701:730],type="l",col="black",xlab="Last n", ylab="Average Daily Temperature",ylim=c(ylim_l,ylim_u), main = "Average Daily Temperature with VAR Forecasts h = 30")
+lines(seq(1,30),preds30$fcst$Avg_Temp[1:30,1],col="red")
+lines(seq(1,30),preds30$fcst$Avg_Temp[1:30,2],col="salmon")
+lines(seq(1,30),preds30$fcst$Avg_Temp[1:30,3],col="salmon")
+```
+
+We have evidence against this data being stationary, thus the poor performance from VAR is expected as VAR will generalize AR (stationary) models.
+
+## Neural Network (MLP)
+```{r}
+set.seed(1)
+Avg_Temp.ts = ts(clean_data$Avg_Temp)
+Humidity.ts = ts(clean_data$Humidity)
+
+H_lag14 = stats::lag(Humidity.ts, -14)
+
+valid = complete.cases(Humidity.ts, H_lag14)
+
+Avg_Temp.ts = Avg_Temp.ts[valid]
+
+n = length(Avg_Temp.ts)
+
+train_end_7 = n - 7
+train_end_30 = n - 30
+
+Avg_Temp.tsT7 = ts(Avg_Temp.ts[1:train_end_7])
+Avg_Temp.tsT30 = ts(Avg_Temp.ts[1:train_end_30])
+
+H_lag14T7 = ts(H_lag14[1:train_end_7])
+H_lag14T30 = ts(H_lag14[1:train_end_30])
+
+fit.mlp7 = mlp(Avg_Temp.tsT7, xreg = data.frame(Humidity = H_lag14T7),difforder=1, allow.det.season = FALSE, hd.auto.type = "manual", hd = 5, reps = 10)
+
+fit.mlp30 = mlp(Avg_Temp.tsT30, xreg = data.frame(Humidity = H_lag14T30),difforder=1, allow.det.season = FALSE, hd.auto.type = "manual", hd = 5, reps = 10)
+```
+
+
+
+```{r}
+fore.mlp7 = forecast(fit.mlp7, xreg = data.frame(Humidity = H_lag14), h=7)
+fore.mlp30 = forecast(fit.mlp30, xreg = data.frame(Humidity = H_lag14), h=30)
+mean((fore.mlp7$mean - Avg_Temp.ts[(train_end_7 + 1):n])^2)
+mean((fore.mlp30$mean - Avg_Temp.ts[(train_end_30 + 1):n])^2)
+```
+
+```{r}
+plot(fit.mlp7)
+plot(fit.mlp30)
+
+plot(clean_data$Avg_Temp[724:730],type="l",col="black",xlab="Last n", ylab="Average Daily Temperature",ylim=c(ylim_l,ylim_u), main = "Average Daily Temperature with MLP Forecasts h = 7")
+lines(seq(1,7),fore.mlp7$mean,col="purple")
+
+plot(clean_data$Avg_Temp[701:730],type="l",col="black",xlab="Last n", ylab="Average Daily Temperature",ylim=c(ylim_l,ylim_u), main = "Average Daily Temperature with MLP Forecasts h = 30")
+lines(seq(1,30),fore.mlp30$mean,col="purple")
+```
+
+6 inputs, 5 hidden nodes, 10 repetitions.
+
+```{r}
+fit2.mlp7 = mlp(Avg_Temp.tsT7, hd.auto.type = "manual", hd = 5, reps = 10)
+
+fit2.mlp30 = mlp(Avg_Temp.tsT30, hd.auto.type = "manual", hd = 5, reps = 10)
+```
+
+```{r}
+fore2.mlp7 = forecast(fit2.mlp7, h=7)
+fore2.mlp30 = forecast(fit2.mlp30, h=30)
+mean((fore2.mlp7$mean - Avg_Temp.ts[(train_end_7 + 1):n])^2)
+mean((fore2.mlp30$mean - Avg_Temp.ts[(train_end_30 + 1):n])^2)
+
+plot(fit2.mlp7)
+plot(fit2.mlp30)
+
+plot(clean_data$Avg_Temp[724:730],type="l",col="black",xlab="Last n", ylab="Average Daily Temperature",ylim=c(ylim_l,ylim_u), main = "Average Daily Temperature with MLP Forecasts h = 7")
+lines(seq(1,7),fore2.mlp7$mean,col="pink")
+
+plot(clean_data$Avg_Temp[701:730],type="l",col="black",xlab="Last n", ylab="Average Daily Temperature",ylim=c(ylim_l,ylim_u), main = "Average Daily Temperature with MLP Forecasts h = 30")
+lines(seq(1,30),fore2.mlp30$mean,col="pink")
+```
+
+2 inputs, 5 hidden nodes, 10 repetitions. Performs slightly better than our multivariate MLP.
+
+## Ensemble Model
+
+Combine ARIMA and MLP Multivariate for short-term and ARMA and MLP Univariate for long-term based off of their ASE values.
+```{r}
+# ARIMA + MLP Multivariate
+ensemble7 = (fore.arima.short$f + fore.mlp7$mean)/2
+ensemble30 = (fore.arma.long$f + fore2.mlp30$mean)/2
+
+# ARMA + MLP Univariate
+mean((ensemble7 - clean_data$Avg_Temp[724:730])^2)
+mean((ensemble30 - clean_data$Avg_Temp[701:730])^2)
+
+plot(clean_data$Avg_Temp[724:730],type="l",col="black",xlab="Last n", ylab="Average Daily Temperature",ylim=c(ylim_l,ylim_u), main = "Average Daily Temperature with Ensemble Forecasts h = 7")
+lines(seq(1,7),ensemble7,col="cyan")
+
+plot(clean_data$Avg_Temp[701:730],type="l",col="black",xlab="Last n", ylab="Average Daily Temperature",ylim=c(ylim_l,ylim_u), main = "Average Daily Temperature with Ensemble Forecasts h = 30")
+lines(seq(1,30),ensemble30,col="cyan")
+```
+
+# Final recommendation and forecasts with the model
+
+ARIMA(1,1,2) as our data appears to be non-stationary.
+
+The short-term performance is great, and while the long-term isn't the best, it does contain the tested values within the confidence intervals. Best to use it solely for short-term forecasting, which will be usually enough for a heads up regarding energy consumption or public utilities maintenance. Long-term forecasts should be done with caution as the forecasting is not very strong - as compared to the short-term.
+
+```{r}
+fore.final.short = fore.arima.wge(clean_data$Avg_Temp, phi = est.d1$phi, theta = est.d1$theta, d = 1, n.ahead = 7, lastn = FALSE, plot = FALSE)
+
+fore.final.long = fore.arima.wge(clean_data$Avg_Temp, phi = est.d1$phi, theta = est.d1$theta, d = 1, n.ahead = 30, lastn = FALSE, plot = FALSE)
+
+plot(seq(724,730),clean_data$Avg_Temp[724:730],type="l",col="black",xlab="Day", ylab="Average Daily Temperature",ylim=c(ylim_l,ylim_u), xlim=c(724,738), main = "Average Daily Temperature with ARIMA(1,1,2) Forecasts h = 7")
+lines(seq(731,737),fore.final.short$f,col="blue")
+lines(seq(731,737),fore.final.short$ul,col="lightblue")
+lines(seq(731,737),fore.final.short$ll,col="lightblue")
+
+plot(seq(724,730),clean_data$Avg_Temp[724:730],type="l",col="black",xlab="Day", ylab="Average Daily Temperature",ylim=c(ylim_l,ylim_u), xlim=c(724,761), main = "Average Daily Temperature with ARIMA(1,1,2) Forecasts h = 30")
+lines(seq(731,760),fore.final.long$f,col="blue")
+lines(seq(731,760),fore.final.long$ul,col="lightblue")
+lines(seq(731,760),fore.final.long$ll,col="lightblue")
+```
+
